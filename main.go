@@ -40,6 +40,8 @@ type options struct {
 	BuildClusterKubeconfigsLocation string
 	ReleaseClusterKubeconfig        string
 	ConfigResolver                  string
+	Command                         string
+	Output                          string
 }
 
 func main() {
@@ -66,7 +68,9 @@ func run() error {
 	pflag.StringVar(&opt.ForcePROwner, "force-pr-owner", opt.ForcePROwner, "Make the supplied user the owner of all PRs for access control purposes.")
 	pflag.StringVar(&ignored, "build-cluster-kubeconfig", ignored, "REMOVED: Kubeconfig to use for buildcluster. Defaults to normal kubeconfig if unset.")
 	pflag.StringVar(&opt.BuildClusterKubeconfigsLocation, "build-cluster-kubeconfigs-location", opt.BuildClusterKubeconfigsLocation, "Path to the location of the Kubeconfigs for the various buildclusters. Default is \"/var/build-cluster-kubeconfigs\".")
-	pflag.StringVar(&opt.ReleaseClusterKubeconfig, "release-cluster-kubeconfig", "", "Kubeconfig to use for cluster housing the release imagestreams. Defaults to normal kubeconfig if unset.")
+	pflag.StringVar(&opt.ReleaseClusterKubeconfig, "release-cluster-kubeconfig", opt.ReleaseClusterKubeconfig, "Kubeconfig to use for cluster housing the release imagestreams. Defaults to normal kubeconfig if unset.")
+	pflag.StringVar(&opt.Command, "command", opt.Command, "The command to run in command-line mode")
+	pflag.StringVar(&opt.Output, "output", opt.Output, "The path, of the file, where to write the prow job JSON")
 	opt.prowconfig.AddFlags(emptyFlags)
 	pflag.CommandLine.AddGoFlagSet(emptyFlags)
 	pflag.Parse()
@@ -88,7 +92,7 @@ func run() error {
 	resolver := &URLConfigResolver{URL: resolverURL}
 
 	botToken := os.Getenv("BOT_TOKEN")
-	if len(botToken) == 0 {
+	if len(botToken) == 0 && len(opt.Command) == 0 {
 		return fmt.Errorf("the environment variable BOT_TOKEN must be set")
 	}
 
@@ -115,13 +119,25 @@ func run() error {
 	}
 
 	manager := NewJobManager(configAgent, resolver, prowClient, imageClient, buildClusterClientConfigs, opt.GithubEndpoint, opt.ForcePROwner)
+
+	if len(opt.Command) > 0 {
+		klog.Infof("Running in command-line mode")
+		klog.Infof("Processing command: %s", opt.Command)
+
+		bot := NewBot("")
+		if err := bot.ProcessCommand(manager, opt.Command, opt.Output); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	if err := manager.Start(); err != nil {
 		return fmt.Errorf("unable to load initial configuration: %v", err)
 	}
 
 	bot := NewBot(botToken)
 	for {
-		if err := bot.Start(manager); err != nil && !isRetriable(err) {
+		if err := bot.Listen(manager); err != nil && !isRetriable(err) {
 			return err
 		}
 		time.Sleep(5 * time.Second)

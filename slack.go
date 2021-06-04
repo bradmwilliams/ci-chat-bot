@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/shomali11/proper"
 	"io"
 	"strings"
 	"time"
@@ -12,6 +13,19 @@ import (
 	"k8s.io/client-go/pkg/version"
 	"k8s.io/klog"
 	prowapiv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
+)
+
+const (
+	authCommandExample        = "auth"
+	buildCommandExample       = "build openshift/origin#49563"
+	doneCommandExample        = "done"
+	launchCommandExample      = "launch openshift/origin#49563 gcp"
+	listCommandExample        = "list"
+	lookupCommandExample      = "lookup 4.7.0"
+	refreshCommandExample     = "refresh"
+	testCommandExample        = "test e2e openshift/origin#49563 gcp"
+	testCommandUpgradeExample = "test upgrade 4.7.0 4.7.14 gcp"
+	versionCommandExample     = "version"
 )
 
 type Bot struct {
@@ -24,60 +38,30 @@ func NewBot(token string) *Bot {
 	}
 }
 
-func (b *Bot) Start(manager JobManager) error {
-	slack := slacker.NewClient(b.token)
-
-	manager.SetNotifier(b.jobResponder(slack))
-
-	slack.DefaultCommand(func(request slacker.Request, response slacker.ResponseWriter) {
+func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
+	client.DefaultCommand(func(request slacker.Request, response slacker.ResponseWriter) {
 		response.Reply("unrecognized command, msg me `help` for a list of all commands")
 	})
 
-	slack.Command("launch <image_or_version_or_pr> <options>", &slacker.CommandDefinition{
+	client.Command("launch <image_or_version_or_pr> <options>", &slacker.CommandDefinition{
 		Description: fmt.Sprintf(
 			"Launch an OpenShift cluster using a known image, version, or PR. You may omit both arguments. Use `nightly` for the latest OCP build, `ci` for the the latest CI build, provide a version directly from any listed on https://amd64.ocp.releases.ci.openshift.org, a stream name (4.1.0-0.ci, 4.1.0-0.nightly, etc), a major/minor `X.Y` to load the latest stable version for that version (`4.1`), `<org>/<repo>#<pr>` to launch from a PR, or an image for the first argument. Options is a comma-delimited list of variations including platform (%s) and variant (%s).",
 			strings.Join(codeSlice(supportedPlatforms), ", "),
 			strings.Join(codeSlice(supportedParameters), ", "),
 		),
-		Example: "launch openshift/origin#49563 gcp",
+		Example: launchCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("this command is only accepted via direct message")
-				return
-			}
-
-			from, err := parseImageInput(request.StringParam("image_or_version_or_pr", ""))
+			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			var inputs [][]string
-			if len(from) > 0 {
-				inputs = [][]string{from}
-			}
-
-			platform, architecture, params, err := parseOptions(request.StringParam("options", ""))
+			req, err := generateJobRequest(user, channel, message, parameters, launchCommandExample)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			if len(params["test"]) > 0 {
-				response.Reply("Test arguments may not be passed from the launch command")
-				return
-			}
-
-			msg, err := manager.LaunchJobForUser(&JobRequest{
-				OriginalMessage: stripLinks(request.Event().Text),
-				User:            user,
-				Inputs:          inputs,
-				Type:            JobTypeInstall,
-				Channel:         channel,
-				Platform:        platform,
-				JobParams:       params,
-				Architecture:    architecture,
-			})
+			msg, err := manager.LaunchJobForUser(req)
 			if err != nil {
 				response.Reply(err.Error())
 				return
@@ -86,8 +70,9 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
-	slack.Command("lookup <image_or_version_or_pr>", &slacker.CommandDefinition{
+	client.Command("lookup <image_or_version_or_pr>", &slacker.CommandDefinition{
 		Description: "Get info about a version.",
+		Example: lookupCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			from, err := parseImageInput(request.StringParam("image_or_version_or_pr", ""))
 			if err != nil {
@@ -102,19 +87,22 @@ func (b *Bot) Start(manager JobManager) error {
 			response.Reply(msg)
 		},
 	})
-	slack.Command("list", &slacker.CommandDefinition{
+
+	client.Command("list", &slacker.CommandDefinition{
 		Description: "See who is hogging all the clusters.",
+		Example: listCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			response.Reply(manager.ListJobs(request.Event().User))
 		},
 	})
-	slack.Command("refresh", &slacker.CommandDefinition{
+
+	client.Command("refresh", &slacker.CommandDefinition{
 		Description: "If the cluster is currently marked as failed, retry fetching its credentials in case of an error.",
+		Example: refreshCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("you must direct message me this request")
+			user, _, _, _, err := processSlackRequest(request)
+			if err != nil {
+				response.Reply(err.Error())
 				return
 			}
 			msg, err := manager.SyncJobForUser(user)
@@ -125,13 +113,13 @@ func (b *Bot) Start(manager JobManager) error {
 			response.Reply(msg)
 		},
 	})
-	slack.Command("done", &slacker.CommandDefinition{
+	client.Command("done", &slacker.CommandDefinition{
 		Description: "Terminate the running cluster",
+		Example: doneCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("you must direct message me this request")
+			user, _, _, _, err := processSlackRequest(request)
+			if err != nil {
+				response.Reply(err.Error())
 				return
 			}
 			msg, err := manager.TerminateJobForUser(user)
@@ -143,13 +131,13 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
-	slack.Command("auth", &slacker.CommandDefinition{
+	client.Command("auth", &slacker.CommandDefinition{
 		Description: "Send the credentials for the cluster you most recently requested",
+		Example: authCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("you must direct message me this request")
+			user, channel, _, _, err := processSlackRequest(request)
+			if err != nil {
+				response.Reply(err.Error())
 				return
 			}
 			job, err := manager.GetLaunchJob(user)
@@ -158,63 +146,25 @@ func (b *Bot) Start(manager JobManager) error {
 				return
 			}
 			job.RequestedChannel = channel
-			b.notifyJob(slacker.NewResponse(request.Event(), slack.Client(), slack.RTM()), job)
+			b.notifyJob(slacker.NewResponse(request.Event(), client.Client(), client.RTM()), job)
 		},
 	})
 
-	slack.Command("test upgrade <from> <to> <options>", &slacker.CommandDefinition{
+	client.Command("test upgrade <from> <to> <options>", &slacker.CommandDefinition{
 		Description: fmt.Sprintf("Run the upgrade tests between two release images. The arguments may be a pull spec of a release image or tags from https://amd64.ocp.releases.ci.openshift.org. You may change the upgrade test by passing `test=NAME` in options with one of %s", strings.Join(codeSlice(supportedUpgradeTests), ", ")),
+		Example: testCommandUpgradeExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("this command is only accepted via direct message")
-				return
-			}
-
-			from, err := parseImageInput(request.StringParam("from", ""))
+			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			if len(from) == 0 {
-				response.Reply("you must specify an image to upgrade from and to")
-				return
-			}
-			to, err := parseImageInput(request.StringParam("to", ""))
+			req, err := generateJobRequest(user, channel, message, parameters, testCommandUpgradeExample)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			// default to to from
-			if len(to) == 0 {
-				to = from
-			}
-
-			platform, architecture, params, err := parseOptions(request.StringParam("options", ""))
-			if err != nil {
-				response.Reply(err.Error())
-				return
-			}
-
-			if v := params["test"]; len(v) == 0 {
-				params["test"] = "e2e-upgrade"
-			}
-			if !strings.Contains(params["test"], "-upgrade") {
-				response.Reply("Only upgrade type tests may be run from this command")
-				return
-			}
-
-			msg, err := manager.LaunchJobForUser(&JobRequest{
-				OriginalMessage: stripLinks(request.Event().Text),
-				User:            user,
-				Inputs:          [][]string{from, to},
-				Type:            JobTypeUpgrade,
-				Channel:         channel,
-				Platform:        platform,
-				JobParams:       params,
-				Architecture:    architecture,
-			})
+			msg, err := manager.LaunchJobForUser(req)
 			if err != nil {
 				response.Reply(err.Error())
 				return
@@ -223,58 +173,21 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
-	slack.Command("test <name> <image_or_version_or_pr> <options>", &slacker.CommandDefinition{
+	client.Command("test <name> <image_or_version_or_pr> <options>", &slacker.CommandDefinition{
 		Description: fmt.Sprintf("Run the requested test suite from an image or release or built PRs. Supported test suites are %s. The from argument may be a pull spec of a release image or tags from https://amd64.ocp.releases.ci.openshift.org. ", strings.Join(codeSlice(supportedTests), ", ")),
+		Example: testCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("this command is only accepted via direct message")
-				return
-			}
-
-			from, err := parseImageInput(request.StringParam("image_or_version_or_pr", ""))
+			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			if len(from) == 0 {
-				response.Reply("you must specify what will be tested")
-				return
-			}
-
-			test := request.StringParam("name", "")
-			if len(test) == 0 {
-				response.Reply(fmt.Sprintf("you must specify the name of a test: %s", strings.Join(codeSlice(supportedTests), ", ")))
-			}
-			switch {
-			case contains(supportedTests, test):
-			default:
-				response.Reply(fmt.Sprintf("warning: You are using a custom test name, may not be supported for all platforms: %s", strings.Join(codeSlice(supportedTests), ", ")))
-			}
-
-			platform, architecture, params, err := parseOptions(request.StringParam("options", ""))
+			req, err := generateJobRequest(user, channel, message, parameters, testCommandExample)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-
-			params["test"] = test
-			if strings.Contains(params["test"], "-upgrade") {
-				response.Reply("Upgrade type tests require the 'test upgrade' command")
-				return
-			}
-
-			msg, err := manager.LaunchJobForUser(&JobRequest{
-				OriginalMessage: request.Event().Text,
-				User:            user,
-				Inputs:          [][]string{from},
-				Type:            JobTypeTest,
-				Channel:         channel,
-				Platform:        platform,
-				JobParams:       params,
-				Architecture:    architecture,
-			})
+			msg, err := manager.LaunchJobForUser(req)
 			if err != nil {
 				response.Reply(err.Error())
 				return
@@ -283,42 +196,21 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
-	slack.Command("build <pullrequest>", &slacker.CommandDefinition{
+	client.Command("build <pullrequest>", &slacker.CommandDefinition{
 		Description: "Create a new release image from one or more pull requests. The successful build location will be sent to you when it completes and then preserved for 12 hours.  Example: `build openshift/operator-framework-olm#68,operator-framework/operator-marketplace#396`",
+		Example: buildCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
-			user := request.Event().User
-			channel := request.Event().Channel
-			if !isDirectMessage(channel) {
-				response.Reply("this command is only accepted via direct message")
-				return
-			}
-
-			from, err := parseImageInput(request.StringParam("pullrequest", ""))
+			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-			if len(from) == 0 {
-				response.Reply("you must specify at least one pull request to build a release image")
-				return
-			}
-
-			platform, architecture, params, err := parseOptions(request.StringParam("options", ""))
+			req, err := generateJobRequest(user, channel, message, parameters, buildCommandExample)
 			if err != nil {
 				response.Reply(err.Error())
 				return
 			}
-
-			msg, err := manager.LaunchJobForUser(&JobRequest{
-				OriginalMessage: stripLinks(request.Event().Text),
-				User:            user,
-				Inputs:          [][]string{from},
-				Type:            JobTypeBuild,
-				Channel:         channel,
-				Platform:        platform,
-				JobParams:       params,
-				Architecture:    architecture,
-			})
+			msg, err := manager.LaunchJobForUser(req)
 			if err != nil {
 				response.Reply(err.Error())
 				return
@@ -327,15 +219,206 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
-	slack.Command("version", &slacker.CommandDefinition{
+	client.Command("version", &slacker.CommandDefinition{
 		Description: "Report the version of the bot",
+		Example: versionCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			response.Reply(fmt.Sprintf("Running `%s` from https://github.com/openshift/ci-chat-bot", version.Get().String()))
 		},
 	})
 
+}
+
+func processSlackRequest(request slacker.Request) (user, channel, message string, parameters *proper.Properties, error error) {
+	user = request.Event().User
+	channel = request.Event().Channel
+	message = stripLinks(request.Event().Text)
+	if !isDirectMessage(channel) {
+		return "", "", "",nil, fmt.Errorf("this command is only accepted via direct message")
+	}
+
+	return user, channel, message, request.Properties(), nil
+}
+
+func generateJobRequest(user, channel, message string, parameters *proper.Properties, example string) (*JobRequest, error) {
+	switch example {
+	case buildCommandExample:
+		from, err := parseImageInput(parameters.StringParam("pullrequest", ""))
+		if err != nil {
+			return nil, err
+		}
+		if len(from) == 0 {
+			return nil, fmt.Errorf("you must specify at least one pull request to build a release image")
+		}
+
+		platform, architecture, params, err := parseOptions(parameters.StringParam("options", ""))
+		if err != nil {
+			return nil, err
+		}
+
+		return &JobRequest{
+			OriginalMessage: message,
+			User:            user,
+			Inputs:          [][]string{from},
+			Type:            JobTypeBuild,
+			Channel:         channel,
+			Platform:        platform,
+			JobParams:       params,
+			Architecture:    architecture,
+		}, nil
+
+	case launchCommandExample:
+		from, err := parseImageInput(parameters.StringParam("image_or_version_or_pr", ""))
+		if err != nil {
+			return nil, err
+		}
+		var inputs [][]string
+		if len(from) > 0 {
+			inputs = [][]string{from}
+		}
+
+		platform, architecture, params, err := parseOptions(parameters.StringParam("options", ""))
+		if err != nil {
+			return nil, err
+		}
+		if len(params["test"]) > 0 {
+			return nil, fmt.Errorf("test arguments may not be passed from the launch command")
+		}
+
+		return &JobRequest{
+			OriginalMessage: message,
+			User:            user,
+			Inputs:          inputs,
+			Type:            JobTypeInstall,
+			Channel:         channel,
+			Platform:        platform,
+			JobParams:       params,
+			Architecture:    architecture,
+		}, nil
+
+	case testCommandExample:
+		from, err := parseImageInput(parameters.StringParam("image_or_version_or_pr", ""))
+		if err != nil {
+			return nil, err
+		}
+		if len(from) == 0 {
+			return nil, fmt.Errorf("you must specify what will be tested")
+		}
+
+		test := parameters.StringParam("name", "")
+		if len(test) == 0 {
+			return nil, fmt.Errorf("you must specify the name of a test: %s", strings.Join(codeSlice(supportedTests), ", "))
+		}
+		switch {
+		case contains(supportedTests, test):
+		default:
+			return nil, fmt.Errorf("warning: You are using a custom test name, may not be supported for all platforms: %s", strings.Join(codeSlice(supportedTests), ", "))
+		}
+
+		platform, architecture, params, err := parseOptions(parameters.StringParam("options", ""))
+		if err != nil {
+			return nil, err
+		}
+
+		params["test"] = test
+		if strings.Contains(params["test"], "-upgrade") {
+			return nil, fmt.Errorf("upgrade type tests require the 'test upgrade' command")
+		}
+
+		return &JobRequest{
+			OriginalMessage: message,
+			User:            user,
+			Inputs:          [][]string{from},
+			Type:            JobTypeTest,
+			Channel:         channel,
+			Platform:        platform,
+			JobParams:       params,
+			Architecture:    architecture,
+		}, nil
+
+	case testCommandUpgradeExample:
+		from, err := parseImageInput(parameters.StringParam("from", ""))
+		if err != nil {
+			return nil, err
+		}
+		if len(from) == 0 {
+			return nil, fmt.Errorf("you must specify an image to upgrade from and to")
+		}
+		to, err := parseImageInput(parameters.StringParam("to", ""))
+		if err != nil {
+			return nil, err
+		}
+		// default to to from
+		if len(to) == 0 {
+			to = from
+		}
+
+		platform, architecture, params, err := parseOptions(parameters.StringParam("options", ""))
+		if err != nil {
+			return nil, err
+		}
+
+		if v := params["test"]; len(v) == 0 {
+			params["test"] = "e2e-upgrade"
+		}
+		if !strings.Contains(params["test"], "-upgrade") {
+			return nil, fmt.Errorf("only upgrade type tests may be run from this command")
+		}
+
+		return &JobRequest{
+			OriginalMessage: message,
+			User:            user,
+			Inputs:          [][]string{from, to},
+			Type:            JobTypeUpgrade,
+			Channel:         channel,
+			Platform:        platform,
+			JobParams:       params,
+			Architecture:    architecture,
+		}, nil
+	}
+	return nil, fmt.Errorf("unable to generate JobRequest")
+}
+
+func (b *Bot) ProcessCommand(manager JobManager, command, output string) error {
+	client := &slacker.Slacker{}
+	b.initialize(client, manager)
+
+	for _, cmd := range client.BotCommands() {
+		parameters, isMatch := cmd.Match(command)
+		if !isMatch {
+			continue
+		}
+
+		definition := cmd.Definition()
+
+		switch definition.Example {
+		case buildCommandExample, launchCommandExample, testCommandExample, testCommandUpgradeExample:
+			req, err := generateJobRequest("cli-generated-prowjob", "", command, parameters, definition.Example)
+			if err != nil {
+				return err
+			}
+			err = manager.GenerateProwJobForCli(req, output)
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("the specified command: %q does not generate a prow job", command)
+		}
+		// Don't continue after a match (i.e "test" and "test upgrade" match twice)
+		return nil
+	}
+	return fmt.Errorf("unsupported command: %q", command)
+}
+
+func (b *Bot) Listen(manager JobManager) error {
+	client := slacker.NewClient(b.token)
+
+	manager.SetNotifier(b.jobResponder(client))
+
+	b.initialize(client, manager)
+
 	klog.Infof("ci-chat-bot up and listening to slack")
-	return slack.Listen(context.Background())
+	return client.Listen(context.Background())
 }
 
 func (b *Bot) jobResponder(s *slacker.Slacker) func(Job) {
