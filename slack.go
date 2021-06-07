@@ -72,7 +72,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("lookup <image_or_version_or_pr>", &slacker.CommandDefinition{
 		Description: "Get info about a version.",
-		Example: lookupCommandExample,
+		Example:     lookupCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			from, err := parseImageInput(request.StringParam("image_or_version_or_pr", ""))
 			if err != nil {
@@ -90,7 +90,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("list", &slacker.CommandDefinition{
 		Description: "See who is hogging all the clusters.",
-		Example: listCommandExample,
+		Example:     listCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			response.Reply(manager.ListJobs(request.Event().User))
 		},
@@ -98,7 +98,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("refresh", &slacker.CommandDefinition{
 		Description: "If the cluster is currently marked as failed, retry fetching its credentials in case of an error.",
-		Example: refreshCommandExample,
+		Example:     refreshCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, _, _, _, err := processSlackRequest(request)
 			if err != nil {
@@ -115,7 +115,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 	})
 	client.Command("done", &slacker.CommandDefinition{
 		Description: "Terminate the running cluster",
-		Example: doneCommandExample,
+		Example:     doneCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, _, _, _, err := processSlackRequest(request)
 			if err != nil {
@@ -133,7 +133,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("auth", &slacker.CommandDefinition{
 		Description: "Send the credentials for the cluster you most recently requested",
-		Example: authCommandExample,
+		Example:     authCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, channel, _, _, err := processSlackRequest(request)
 			if err != nil {
@@ -152,7 +152,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("test upgrade <from> <to> <options>", &slacker.CommandDefinition{
 		Description: fmt.Sprintf("Run the upgrade tests between two release images. The arguments may be a pull spec of a release image or tags from https://amd64.ocp.releases.ci.openshift.org. You may change the upgrade test by passing `test=NAME` in options with one of %s", strings.Join(codeSlice(supportedUpgradeTests), ", ")),
-		Example: testCommandUpgradeExample,
+		Example:     testCommandUpgradeExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
@@ -175,7 +175,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("test <name> <image_or_version_or_pr> <options>", &slacker.CommandDefinition{
 		Description: fmt.Sprintf("Run the requested test suite from an image or release or built PRs. Supported test suites are %s. The from argument may be a pull spec of a release image or tags from https://amd64.ocp.releases.ci.openshift.org. ", strings.Join(codeSlice(supportedTests), ", ")),
-		Example: testCommandExample,
+		Example:     testCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
@@ -198,7 +198,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("build <pullrequest>", &slacker.CommandDefinition{
 		Description: "Create a new release image from one or more pull requests. The successful build location will be sent to you when it completes and then preserved for 12 hours.  Example: `build openshift/operator-framework-olm#68,operator-framework/operator-marketplace#396`",
-		Example: buildCommandExample,
+		Example:     buildCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			user, channel, message, parameters, err := processSlackRequest(request)
 			if err != nil {
@@ -221,7 +221,7 @@ func (b *Bot) initialize(client *slacker.Slacker, manager JobManager) {
 
 	client.Command("version", &slacker.CommandDefinition{
 		Description: "Report the version of the bot",
-		Example: versionCommandExample,
+		Example:     versionCommandExample,
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			response.Reply(fmt.Sprintf("Running `%s` from https://github.com/openshift/ci-chat-bot", version.Get().String()))
 		},
@@ -234,7 +234,7 @@ func processSlackRequest(request slacker.Request) (user, channel, message string
 	channel = request.Event().Channel
 	message = stripLinks(request.Event().Text)
 	if !isDirectMessage(channel) {
-		return "", "", "",nil, fmt.Errorf("this command is only accepted via direct message")
+		return "", "", "", nil, fmt.Errorf("this command is only accepted via direct message")
 	}
 
 	return user, channel, message, request.Properties(), nil
