@@ -89,8 +89,6 @@ type options struct {
 	rosaBillingAccount       string
 	overrideLaunchLabel      string
 	overrideRosaSecretName   string
-
-	jiraOptions flagutil.JiraOptions
 }
 
 func (o *options) Validate() error {
@@ -148,14 +146,25 @@ func run() error {
 	pflag.StringVar(&opt.rosaBillingAccount, "rosa-billingAccount-path", "", "Path to the Billing Account ID.")
 	pflag.BoolVar(&opt.disableRosa, "disable-rosa", false, "Do not load the rosa client")
 
+	// Deprecated: Jira integration has been removed. These flags are kept
+	// for backward compatibility with existing deployment configurations.
+	var deprecatedJiraEndpoint, deprecatedJiraUsername, deprecatedJiraPasswordFile string
+	pflag.StringVar(&deprecatedJiraEndpoint, "jira-endpoint", "", "Deprecated: Jira integration has been removed")
+	pflag.StringVar(&deprecatedJiraUsername, "jira-username", "", "Deprecated: Jira integration has been removed")
+	pflag.StringVar(&deprecatedJiraPasswordFile, "jira-password-file", "", "Deprecated: Jira integration has been removed")
+
 	opt.prowconfig.AddFlags(emptyFlags)
 	opt.GitHubOptions.AddFlags(emptyFlags)
 	opt.KubernetesOptions.AddFlags(emptyFlags)
 	opt.InstrumentationOptions.AddFlags(emptyFlags)
-	opt.jiraOptions.AddFlags(emptyFlags)
 	pflag.CommandLine.AddGoFlagSet(emptyFlags)
 	pflag.Parse()
 	klog.SetOutput(os.Stderr)
+
+	if deprecatedJiraEndpoint != "" || deprecatedJiraUsername != "" || deprecatedJiraPasswordFile != "" {
+		klog.Warning("Jira flags (--jira-endpoint, --jira-username, --jira-password-file) are deprecated and will be removed in a future release. Jira integration has been removed.")
+	}
+
 	// let k8s know that we're alive
 	health := pjutil.NewHealthOnPort(opt.InstrumentationOptions.HealthPort)
 
@@ -417,16 +426,10 @@ func run() error {
 	}
 
 	bot := slack.NewBot(botToken, botSigningSecret, opt.GracePeriod, opt.Port, &workflows)
-	jiraclient, err := opt.jiraOptions.Client()
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	if err != nil {
-		klog.Errorf("failed to load the Jira Client: %s", err)
-		Start(bot, nil, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics)
-	} else {
-		Start(bot, jiraclient.JiraClient(), jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics)
-	}
+	Start(bot, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics)
 
-	return err
+	return nil
 }
 
 func processKubeConfigs(kubeConfigs map[string]rest.Config) (utils.BuildClusterClientConfigMap, error) {
